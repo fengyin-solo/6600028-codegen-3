@@ -1,100 +1,184 @@
 import { defineStore } from 'pinia'
 import { SPHEngine, DEFAULT_PARAMS, PRESETS } from '../utils/sph-engine'
-import type { SimParams, Preset, Particle } from '../types'
+import type { SimParams, Preset, SimSlot, SimInstance } from '../types'
 
-export const useFluidStore = defineStore('fluid', {
-  state: () => ({
-    engine: null as SPHEngine | null,
+function createDefaultInstance(): SimInstance {
+  return {
+    engine: null,
     isRunning: false,
     particleCount: 800,
     currentPreset: PRESETS[0],
-    params: { ...DEFAULT_PARAMS } as SimParams,
+    params: { ...DEFAULT_PARAMS },
     fps: 0,
     frameCount: 0,
-    _animId: null as number | null,
+    _animId: null,
     _lastTime: 0,
     _fpsAccum: 0,
     _fpsFrames: 0,
+  }
+}
+
+function getParticleArray(inst: SimInstance) {
+  return inst.engine?.particles ?? []
+}
+
+function getAvgDensity(inst: SimInstance) {
+  if (!inst.engine || inst.engine.particles.length === 0) return 0
+  const sum = inst.engine.particles.reduce((s, p) => s + p.density, 0)
+  return sum / inst.engine.particles.length
+}
+
+function getMaxVelocity(inst: SimInstance) {
+  if (!inst.engine || inst.engine.particles.length === 0) return 0
+  return Math.max(...inst.engine.particles.map(p => Math.sqrt(p.vx * p.vx + p.vy * p.vy)))
+}
+
+export const useFluidStore = defineStore('fluid', {
+  state: () => ({
+    compareMode: false,
+    simA: createDefaultInstance(),
+    simB: createDefaultInstance(),
   }),
   getters: {
-    particleArray: (state) => state.engine?.particles ?? [],
-    avgDensity: (state) => {
-      if (!state.engine || state.engine.particles.length === 0) return 0
-      const sum = state.engine.particles.reduce((s, p) => s + p.density, 0)
-      return sum / state.engine.particles.length
+    activeSlot(): SimSlot {
+      return 'A'
     },
-    maxVelocity: (state) => {
-      if (!state.engine || state.engine.particles.length === 0) return 0
-      return Math.max(...state.engine.particles.map(p => Math.sqrt(p.vx * p.vx + p.vy * p.vy)))
-    },
+    engine: (state) => state.simA.engine,
+    isRunning: (state) => state.simA.isRunning,
+    particleCount: (state) => state.simA.particleCount,
+    currentPreset: (state) => state.simA.currentPreset,
+    params: (state) => state.simA.params,
+    fps: (state) => state.simA.fps,
+    frameCount: (state) => state.simA.frameCount,
+    particleArray: (state) => getParticleArray(state.simA),
+    avgDensity: (state) => getAvgDensity(state.simA),
+    maxVelocity: (state) => getMaxVelocity(state.simA),
   },
   actions: {
-    initSimulation(preset?: Preset) {
+    getSim(slot: SimSlot): SimInstance {
+      return slot === 'A' ? this.simA : this.simB
+    },
+
+    initSimulation(preset?: Preset, slot: SimSlot = 'A') {
+      const inst = this.getSim(slot)
       if (preset) {
-        this.currentPreset = preset
-        this.params = { ...DEFAULT_PARAMS, ...preset.params }
-        this.particleCount = preset.particleCount
+        inst.currentPreset = preset
+        inst.params = { ...DEFAULT_PARAMS, ...preset.params }
+        inst.particleCount = preset.particleCount
       }
       const canvas = { width: 800, height: 500 }
-      this.engine = new SPHEngine(this.particleCount, canvas.width, canvas.height, this.params)
-      this.engine.initParticles(this.currentPreset.initialConfig, this.particleCount)
-      this.frameCount = 0
-      this.fps = 0
+      inst.engine = new SPHEngine(inst.particleCount, canvas.width, canvas.height, inst.params)
+      inst.engine.initParticles(inst.currentPreset.initialConfig, inst.particleCount)
+      inst.frameCount = 0
+      inst.fps = 0
     },
-    start() {
-      if (this.isRunning || !this.engine) return
-      this.isRunning = true
-      this._lastTime = performance.now()
-      this._fpsAccum = 0
-      this._fpsFrames = 0
+
+    start(slot: SimSlot = 'A') {
+      const inst = this.getSim(slot)
+      if (inst.isRunning || !inst.engine) return
+      inst.isRunning = true
+      inst._lastTime = performance.now()
+      inst._fpsAccum = 0
+      inst._fpsFrames = 0
       const loop = (now: number) => {
-        if (!this.isRunning || !this.engine) return
-        const elapsed = now - this._lastTime
-        this._lastTime = now
-        this._fpsAccum += elapsed
-        this._fpsFrames++
-        if (this._fpsAccum >= 500) {
-          this.fps = Math.round(this._fpsFrames / (this._fpsAccum / 1000))
-          this._fpsAccum = 0
-          this._fpsFrames = 0
+        if (!inst.isRunning || !inst.engine) return
+        const elapsed = now - inst._lastTime
+        inst._lastTime = now
+        inst._fpsAccum += elapsed
+        inst._fpsFrames++
+        if (inst._fpsAccum >= 500) {
+          inst.fps = Math.round(inst._fpsFrames / (inst._fpsAccum / 1000))
+          inst._fpsAccum = 0
+          inst._fpsFrames = 0
         }
-        // Sub-steps for stability
         const subSteps = 3
         for (let s = 0; s < subSteps; s++) {
-          this.engine.step()
+          inst.engine.step()
         }
-        this.frameCount++
-        this._animId = requestAnimationFrame(loop)
+        inst.frameCount++
+        inst._animId = requestAnimationFrame(loop)
       }
-      this._animId = requestAnimationFrame(loop)
+      inst._animId = requestAnimationFrame(loop)
     },
-    stop() {
-      this.isRunning = false
-      if (this._animId !== null) {
-        cancelAnimationFrame(this._animId)
-        this._animId = null
+
+    stop(slot: SimSlot = 'A') {
+      const inst = this.getSim(slot)
+      inst.isRunning = false
+      if (inst._animId !== null) {
+        cancelAnimationFrame(inst._animId)
+        inst._animId = null
       }
     },
-    reset() {
-      this.stop()
-      this.initSimulation(this.currentPreset)
+
+    reset(slot: SimSlot = 'A') {
+      this.stop(slot)
+      this.initSimulation(undefined, slot)
     },
-    stepOnce() {
-      if (!this.engine || this.isRunning) return
+
+    stepOnce(slot: SimSlot = 'A') {
+      const inst = this.getSim(slot)
+      if (!inst.engine || inst.isRunning) return
       const subSteps = 3
       for (let s = 0; s < subSteps; s++) {
-        this.engine.step()
+        inst.engine.step()
       }
-      this.frameCount++
+      inst.frameCount++
     },
-    updateParam(key: keyof SimParams, value: number) {
-      this.params[key] = value
-      if (this.engine) {
-        this.engine.params[key] = value
+
+    updateParam(key: keyof SimParams, value: number, slot: SimSlot = 'A') {
+      const inst = this.getSim(slot)
+      inst.params[key] = value
+      if (inst.engine) {
+        inst.engine.params[key] = value
         if (key === 'smoothingRadius') {
-          this.engine['cellSize'] = value
+          inst.engine['cellSize'] = value
         }
       }
+    },
+
+    setParticleCount(count: number, slot: SimSlot = 'A') {
+      this.getSim(slot).particleCount = count
+    },
+
+    toggleCompareMode() {
+      this.compareMode = !this.compareMode
+      if (this.compareMode) {
+        if (!this.simB.engine) {
+          this.initSimulation(PRESETS[1], 'B')
+        }
+      }
+    },
+
+    startAll() {
+      this.start('A')
+      if (this.compareMode) this.start('B')
+    },
+
+    stopAll() {
+      this.stop('A')
+      this.stop('B')
+    },
+
+    resetAll() {
+      this.reset('A')
+      if (this.compareMode) this.reset('B')
+    },
+
+    stepAll() {
+      this.stepOnce('A')
+      if (this.compareMode) this.stepOnce('B')
+    },
+
+    particleArrayOf(slot: SimSlot) {
+      return getParticleArray(this.getSim(slot))
+    },
+
+    avgDensityOf(slot: SimSlot) {
+      return getAvgDensity(this.getSim(slot))
+    },
+
+    maxVelocityOf(slot: SimSlot) {
+      return getMaxVelocity(this.getSim(slot))
     },
   },
 })
